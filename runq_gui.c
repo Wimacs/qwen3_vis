@@ -78,6 +78,11 @@ typedef struct {
     float scroll_offset;
     float target_scroll;
     int is_generating;
+    int input_active;
+    int input_active_prev;
+    char preedit_text[64];
+    int preedit_cursor;
+    int preedit_length;
 } ChatUI;
 
 // ----------------------------------------------------------------------------
@@ -2053,6 +2058,22 @@ static float MeasureCodepointWidth(Font font, int codepoint, float fontSize, flo
     return MeasureTextEx(font, buf, fontSize, spacing).x;
 }
 
+static float MeasureUTF8PrefixWidth(Font font, const char *text, int codepoints, float fontSize, float spacing) {
+    if (text == NULL || codepoints <= 0) return 0.0f;
+    float width = 0.0f;
+    const char *ptr = text;
+    int count = 0;
+    while (*ptr != '\0' && count < codepoints) {
+        int codepointSize = 0;
+        int cp = GetCodepointNext(ptr, &codepointSize);
+        if (codepointSize <= 0) break;
+        width += MeasureCodepointWidth(font, cp, fontSize, spacing);
+        ptr += codepointSize;
+        count++;
+    }
+    return width;
+}
+
 #if defined(_WIN32)
 static void UpdateImeWindowPosition(int x, int y) {
     HWND hwnd = (HWND)GetWindowHandle();
@@ -2368,6 +2389,7 @@ int main(int argc, char *argv[]) {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Qwen3 Visualizer - Activations");
     SetTargetFPS(60);
+
     
     // Draw loading screen
     BeginDrawing();
@@ -2441,6 +2463,7 @@ int main(int argc, char *argv[]) {
         int panelHeight = screenHeight - PANEL_MARGIN * 2;
         int chatAreaHeight = panelHeight - INPUT_BOX_HEIGHT - UI_SCALE_I(40);
         int messageMaxWidth = chatPanelWidth - 40;
+        int inputY = PANEL_MARGIN + panelHeight - INPUT_BOX_HEIGHT - UI_SCALE_I(5);
         
         // Handle visualization type switching
         if (IsKeyPressed(KEY_TAB)) {
@@ -2514,8 +2537,38 @@ int main(int argc, char *argv[]) {
             }
         }
         
+        if (ui.is_generating) {
+            ui.input_active = 0;
+        }
+
+        // Handle chat input focus
+        Rectangle inputBoxRect = {PANEL_MARGIN + 5, (float)(inputY), (float)(chatPanelWidth - 10), (float)INPUT_BOX_HEIGHT};
+        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            ui.input_active = CheckCollisionPointRec(mouse, inputBoxRect);
+        }
+
+#if defined(PLATFORM_DESKTOP_SDL)
+        if (ui.input_active != ui.input_active_prev) {
+            if (ui.input_active) StartTextInput();
+            else StopTextInput();
+            ui.input_active_prev = ui.input_active;
+        }
+#endif
+
         // Handle chat input (UTF-8, IME-friendly)
-        if (!ui.is_generating) {
+        if (!ui.is_generating && ui.input_active) {
+#if defined(PLATFORM_DESKTOP_SDL)
+            IMECompositionInfo comp = GetIMECompositionInfo();
+            strncpy(ui.preedit_text, comp.text, sizeof(ui.preedit_text) - 1);
+            ui.preedit_text[sizeof(ui.preedit_text) - 1] = '\0';
+            ui.preedit_cursor = comp.cursor;
+            ui.preedit_length = comp.length;
+#else
+            ui.preedit_text[0] = '\0';
+            ui.preedit_cursor = 0;
+            ui.preedit_length = 0;
+#endif
+
             int textInputThisFrame = 0;
             int key = GetCharPressed();
             while (key > 0) {
@@ -2631,16 +2684,19 @@ int main(int argc, char *argv[]) {
         }
         
         ui.scroll_offset += (ui.target_scroll - ui.scroll_offset) * 0.15f;
-
-        int inputY = PANEL_MARGIN + panelHeight - INPUT_BOX_HEIGHT - UI_SCALE_I(5);
-        if (!ui.is_generating) {
+        if (!ui.is_generating && ui.input_active) {
             float textWidth = MeasureTextEx(chat_font, ui.input_buffer, (float)FONT_SIZE, 1.0f).x;
             float caretX = (float)(PANEL_MARGIN + 15) + textWidth;
             float caretY = (float)(inputY + (INPUT_BOX_HEIGHT - FONT_SIZE) / 2);
-            Vector2 dpi = GetWindowScaleDPI();
-            int imeX = (int)(caretX * dpi.x + 0.5f);
-            int imeY = (int)((caretY + FONT_SIZE) * dpi.y + 0.5f);
+            float scaleX = (float)GetRenderWidth() / (float)GetScreenWidth();
+            float scaleY = (float)GetRenderHeight() / (float)GetScreenHeight();
+            int imeX = (int)(caretX * scaleX + 0.5f);
+            int imeY = (int)((caretY + FONT_SIZE) * scaleY + 0.5f);
+#if defined(PLATFORM_DESKTOP_SDL)
+            SetTextInputRect(imeX, imeY, 1, (int)(FONT_SIZE * scaleY + 0.5f));
+#else
             UpdateImeWindowPosition(imeX, imeY);
+#endif
         }
         
         // Drawing
@@ -2699,9 +2755,46 @@ int main(int argc, char *argv[]) {
         
         if (ui.input_length > 0) {
             DrawTextEx(chat_font, ui.input_buffer, (Vector2){(float)(PANEL_MARGIN + 15), (float)(inputY + (INPUT_BOX_HEIGHT - FONT_SIZE) / 2)}, (float)FONT_SIZE, 1.0f, TEXT_COLOR);
-            if ((int)(GetTime() * 2) % 2) {
+            if (ui.preedit_text[0] == '\0' && ((int)(GetTime() * 2) % 2)) {
                 int cursorX = (int)(PANEL_MARGIN + 15 + MeasureTextEx(chat_font, ui.input_buffer, (float)FONT_SIZE, 1.0f).x);
                 DrawTextEx(chat_font, "|", (Vector2){(float)cursorX, (float)(inputY + (INPUT_BOX_HEIGHT - FONT_SIZE) / 2)}, (float)FONT_SIZE, 1.0f, ACCENT_COLOR);
+            }
+            if (ui.preedit_text[0] != '\0') {
+                float preeditX = (float)(PANEL_MARGIN + 15) + MeasureTextEx(chat_font, ui.input_buffer, (float)FONT_SIZE, 1.0f).x;
+                float preeditY = (float)(inputY + (INPUT_BOX_HEIGHT - FONT_SIZE) / 2);
+
+                // Selection highlight within preedit
+                if (ui.preedit_length > 0) {
+                    float selStart = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor, (float)FONT_SIZE, 1.0f);
+                    float selWidth = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor + ui.preedit_length, (float)FONT_SIZE, 1.0f) - selStart;
+                    DrawRectangle((int)(preeditX + selStart), (int)(preeditY + 2), (int)(selWidth + 1), (int)(FONT_SIZE + 2), (Color){80, 80, 120, 180});
+                }
+
+                DrawTextEx(chat_font, ui.preedit_text, (Vector2){preeditX, preeditY}, (float)FONT_SIZE, 1.0f, (Color){180, 180, 190, 255});
+                float preeditW = MeasureTextEx(chat_font, ui.preedit_text, (float)FONT_SIZE, 1.0f).x;
+                DrawLine((int)preeditX, (int)(preeditY + FONT_SIZE), (int)(preeditX + preeditW), (int)(preeditY + FONT_SIZE), (Color){180, 180, 190, 255});
+
+                if (ui.preedit_length == 0) {
+                    float caretOffset = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor, (float)FONT_SIZE, 1.0f);
+                    DrawLine((int)(preeditX + caretOffset), (int)preeditY, (int)(preeditX + caretOffset), (int)(preeditY + FONT_SIZE), ACCENT_COLOR);
+                }
+            }
+        } else if (ui.preedit_text[0] != '\0') {
+            float preeditX = (float)(PANEL_MARGIN + 15);
+            float preeditY = (float)(inputY + (INPUT_BOX_HEIGHT - FONT_SIZE) / 2);
+            if (ui.preedit_length > 0) {
+                float selStart = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor, (float)FONT_SIZE, 1.0f);
+                float selWidth = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor + ui.preedit_length, (float)FONT_SIZE, 1.0f) - selStart;
+                DrawRectangle((int)(preeditX + selStart), (int)(preeditY + 2), (int)(selWidth + 1), (int)(FONT_SIZE + 2), (Color){80, 80, 120, 180});
+            }
+
+            DrawTextEx(chat_font, ui.preedit_text, (Vector2){preeditX, preeditY}, (float)FONT_SIZE, 1.0f, (Color){180, 180, 190, 255});
+            float preeditW = MeasureTextEx(chat_font, ui.preedit_text, (float)FONT_SIZE, 1.0f).x;
+            DrawLine((int)preeditX, (int)(preeditY + FONT_SIZE), (int)(preeditX + preeditW), (int)(preeditY + FONT_SIZE), (Color){180, 180, 190, 255});
+
+            if (ui.preedit_length == 0) {
+                float caretOffset = MeasureUTF8PrefixWidth(chat_font, ui.preedit_text, ui.preedit_cursor, (float)FONT_SIZE, 1.0f);
+                DrawLine((int)(preeditX + caretOffset), (int)preeditY, (int)(preeditX + caretOffset), (int)(preeditY + FONT_SIZE), ACCENT_COLOR);
             }
         } else {
             const char *placeholder = ui.is_generating ? "Generating..." : "Type message...";
@@ -2900,6 +2993,10 @@ int main(int argc, char *argv[]) {
     }
     
     if (unload_chat_font) UnloadFont(chat_font);
+
+#if defined(PLATFORM_DESKTOP_SDL)
+    StopTextInput();
+#endif
 
     chat_free(&chat_state);
     CloseWindow();

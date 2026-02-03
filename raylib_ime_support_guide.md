@@ -6,15 +6,11 @@
 
 ## 技术方案（基于实战结果）
 
-本指南提供 **两个可行路径**，你可以按项目实际选择：
+**只保留 SDL 方案**，保证跨平台（Windows/macOS/Linux）一致，并避免平台特化代码。
 
-### 方案 A：SDL 后端（跨平台、工程改动在 raylib 平台层）
-- 优点：跨平台、候选框位置可控（`SDL_SetTextInputRect`）
+### 方案：SDL 后端（跨平台、工程改动在 raylib 平台层）
+- 优点：跨平台、候选框位置可控（SDL2: `SDL_SetTextInputRect` / SDL3: `SDL_SetTextInputArea`）
 - 代价：需要改 raylib 平台层，并切换到 SDL 后端构建
-
-### 方案 B：Windows 原生 IME（不改平台后端、改应用）
-- 优点：不需要切后端；在 Win32 下直接可用
-- 代价：仅 Windows；需要在应用侧手动设置 IME 窗口位置（`ImmSetCompositionWindow`）
 
 ## 前置要求
 
@@ -26,11 +22,33 @@
 
 > **重要经验**：中文显示成 `?` 的常见原因不是 IME，而是字体没真正加载成功，或 `TTC` 字体集合未被解析。
 
-### 第一步：修改 SDL 后端源文件
+### 第一步：切换 raylib 到 SDL 后端（必做）
+
+#### 1.1 在你的 CMake 中指定 SDL 平台
+
+```cmake
+# 在 add_subdirectory(3rd/raylib) 之前：
+set(PLATFORM "SDL" CACHE STRING "" FORCE)
+```
+
+#### 1.2 引入 SDL（建议使用子目录）
+
+```cmake
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+add_subdirectory(3rd/SDL2 EXCLUDE_FROM_ALL)
+```
+
+> 实测你拉的是 SDL3 代码仓库，但目录叫 SDL2；raylib 会自动识别 SDL3 target。
+
+---
+
+### 第二步：修改 SDL 后端源文件（IME 支持）
 
 文件路径：`src/platforms/rcore_desktop_sdl.c`
 
-#### 1.1 在文件顶部添加 IME 相关变量
+#### 2.1 在文件顶部添加 IME 相关变量
 
 在 `PlatformData` 结构体或全局变量区域添加：
 
@@ -38,23 +56,24 @@
 // IME Support
 static bool imeEnabled = false;
 static SDL_Rect imeRect = { 0, 0, 1, 20 };
+static IMECompositionInfo imeComposition = { 0 };
 ```
 
-#### 1.2 修改 InitPlatform() 函数
+#### 2.2 修改 InitPlatform() 函数（重要：Hint 必须在 SDL_Init 之前）
 
-在 `SDL_CreateWindow()` 调用**之前**添加 IME hint：
+**必须在 `SDL_Init()` 之前设置**，否则 SDL3 不会发预编辑事件。
 
 ```c
-// Enable native IME UI (candidate window)
+#if defined(USING_VERSION_SDL3)
+SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "composition");
+#else
 SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
-
-// 对于 SDL3，还可以设置：
-// SDL_SetHint(SDL_HINT_IME_INTERNAL_EDITING, "1");
+#endif
 ```
 
-查找 `SDL_CreateWindow` 调用位置，在其前面插入上述代码。
+> 真实踩坑：放在 `SDL_Init()` 之后会导致 **预编辑事件完全不触发**。
 
-#### 1.3 添加 IME 控制函数
+#### 2.3 添加 IME 控制函数（SDL2 vs SDL3 差异）
 
 在文件末尾（`// Module Functions Definition` 区域）添加以下函数：
 
@@ -66,21 +85,33 @@ SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
 // Start text input mode (activate IME)
 void StartTextInput(void)
 {
+#if defined(USING_VERSION_SDL3)
+    SDL_StartTextInput(platform.window);
+#else
     SDL_StartTextInput();
+#endif
     imeEnabled = true;
 }
 
 // Stop text input mode (deactivate IME)
 void StopTextInput(void)
 {
+#if defined(USING_VERSION_SDL3)
+    SDL_StopTextInput(platform.window);
+#else
     SDL_StopTextInput();
+#endif
     imeEnabled = false;
 }
 
 // Check if text input is active
 bool IsTextInputActive(void)
 {
+#if defined(USING_VERSION_SDL3)
+    return SDL_TextInputActive(platform.window);
+#else
     return SDL_IsTextInputActive();
+#endif
 }
 
 // Set IME candidate window position
@@ -91,7 +122,11 @@ void SetTextInputRect(int x, int y, int width, int height)
     imeRect.y = y;
     imeRect.w = width;
     imeRect.h = height;
+#if defined(USING_VERSION_SDL3)
+    SDL_SetTextInputArea(platform.window, &imeRect, 0);
+#else
     SDL_SetTextInputRect(&imeRect);
+#endif
 }
 
 // Get current IME rect
@@ -100,9 +135,15 @@ Rectangle GetTextInputRect(void)
     return (Rectangle){ (float)imeRect.x, (float)imeRect.y, 
                         (float)imeRect.w, (float)imeRect.h };
 }
+
+// Get IME preedit info
+IMECompositionInfo GetIMECompositionInfo(void)
+{
+    return imeComposition;
+}
 ```
 
-#### 1.4 关键点：候选框位置的坐标系（必须处理 DPI/缩放）
+#### 2.4 关键点：候选框位置的坐标系（必须处理 DPI/缩放）
 
 `SDL_SetTextInputRect` 需要的是**窗口客户端区域的像素坐标**，而不是 world 坐标或缩放后的虚拟坐标。  
 如果你用了高 DPI、摄像机（`BeginMode2D`）、或 RenderTexture 做缩放/信箱渲染，必须把光标位置转换到**屏幕像素**再传入：
@@ -113,11 +154,12 @@ Vector2 caretScreen = caretPos; // 默认就是 screen-space
 // 如果在 2D 摄像机下绘制 UI，先转到屏幕坐标：
 // Vector2 caretScreen = GetWorldToScreen2D(caretWorldPos, camera);
 
-// 2) 处理高 DPI：转换到窗口像素
-Vector2 dpi = GetWindowScaleDPI();   // 例如 1.0/1.5/2.0
-int imeX = (int)(caretScreen.x * dpi.x + 0.5f);
-int imeY = (int)((caretScreen.y + lineHeight) * dpi.y + 0.5f);
-int imeH = (int)(lineHeight * dpi.y + 0.5f);
+// 2) 处理高 DPI：优先使用渲染尺寸比例（更可靠）
+float scaleX = (float)GetRenderWidth() / (float)GetScreenWidth();
+float scaleY = (float)GetRenderHeight() / (float)GetScreenHeight();
+int imeX = (int)(caretScreen.x * scaleX + 0.5f);
+int imeY = (int)((caretScreen.y + lineHeight) * scaleY + 0.5f);
+int imeH = (int)(lineHeight * scaleY + 0.5f);
 
 // 3) 设置候选框位置（每帧更新）
 SetTextInputRect(imeX, imeY, 1, imeH);
@@ -125,28 +167,33 @@ SetTextInputRect(imeX, imeY, 1, imeH);
 
 > 经验：候选框通常显示在**光标矩形的右下方**，所以把 `y` 设为 `caretY + lineHeight` 更稳。
 
-#### 1.5 处理 SDL_TEXTEDITING 事件（可选，用于显示预编辑文本）
+#### 2.5 处理 SDL_TEXTEDITING 事件（必做：预编辑文本显示）
 
 在 `PollInputEvents()` 函数中找到 `SDL_TEXTINPUT` 事件处理，在其附近添加：
 
 ```c
+#if defined(USING_VERSION_SDL3)
+case SDL_EVENT_TEXT_EDITING:
+{
+    strncpy(imeComposition.text, event.edit.text, sizeof(imeComposition.text) - 1);
+    imeComposition.text[sizeof(imeComposition.text) - 1] = '\0';
+    imeComposition.cursor = event.edit.start;
+    imeComposition.length = event.edit.length;
+} break;
+#else
 case SDL_TEXTEDITING:
 {
-    // event.edit.text  - 当前预编辑文本（如拼音）
-    // event.edit.start - 光标位置
-    // event.edit.length - 选中长度
-    
-    // 存储预编辑信息供应用使用
-    // 注意：这需要在 CORE 结构中添加相应字段
-    // CORE.Input.IME.compositionText
-    // CORE.Input.IME.compositionCursor
-    // CORE.Input.IME.compositionLength
-    
-    TRACELOG(LOG_DEBUG, "IME Composition: %s", event.edit.text);
+    strncpy(imeComposition.text, event.edit.text, sizeof(imeComposition.text) - 1);
+    imeComposition.text[sizeof(imeComposition.text) - 1] = '\0';
+    imeComposition.cursor = event.edit.start;
+    imeComposition.length = event.edit.length;
 } break;
+#endif
 ```
 
-### 第二步：修改 raylib.h 头文件
+---
+
+### 第三步：修改 raylib.h 头文件
 
 文件路径：`src/raylib.h`
 
@@ -162,6 +209,14 @@ RLAPI void StopTextInput(void);                                     // Stop text
 RLAPI bool IsTextInputActive(void);                                 // Check if text input is active
 RLAPI void SetTextInputRect(int x, int y, int width, int height);   // Set IME candidate window position
 RLAPI Rectangle GetTextInputRect(void);                             // Get current IME rect
+
+typedef struct {
+    char text[64];      // Preedit text (UTF-8)
+    int cursor;         // Cursor position in preedit
+    int length;         // Selection length in preedit
+} IMECompositionInfo;
+
+RLAPI IMECompositionInfo GetIMECompositionInfo(void);              // Get current IME preedit info
 #endif
 ```
 
@@ -176,7 +231,7 @@ void SetTextInputRect(int x, int y, int width, int height) { }
 Rectangle GetTextInputRect(void) { return (Rectangle){ 0 }; }
 ```
 
-### 第三步：编译 raylib（使用 SDL 后端）
+### 第四步：编译 raylib（使用 SDL 后端）
 
 #### 使用 Makefile
 
@@ -193,9 +248,17 @@ make PLATFORM=PLATFORM_DESKTOP_SDL
 
 #### 使用 CMake（需要额外配置）
 
-CMake 目前不直接支持 SDL 后端，需要修改 CMakeLists.txt 或使用 Makefile。
+CMake 需要指定 `PLATFORM=SDL` 并确保能找到 SDL2/SDL3：
 
-### 第四步：创建测试示例
+```cmake
+# 在 add_subdirectory(3rd/raylib) 之前：
+set(PLATFORM "SDL" CACHE STRING "" FORCE)
+add_subdirectory(3rd/raylib)
+```
+
+> SDL2/SDL3 需要在系统已安装，或通过 add_subdirectory 引入对应源码。
+
+### 第五步：创建测试示例
 
 创建文件 `examples/text/text_input_ime.c`：
 
@@ -222,17 +285,18 @@ static int GetPreviousCodepointOffset(const char *text, int bytePos)
     return offset;
 }
 
-// Keep IME candidate window aligned with caret (DPI-aware)
-static void UpdateImeRect(Rectangle inputBox, Font font, const char *text, int fontSize)
-{
-    Vector2 textSize = MeasureTextEx(font, text, (float)fontSize, 1);
-    Vector2 caret = (Vector2){ inputBox.x + 10 + textSize.x, inputBox.y + 10 };
-    Vector2 dpi = GetWindowScaleDPI();
-    int imeX = (int)(caret.x * dpi.x + 0.5f);
-    int imeY = (int)((caret.y + fontSize) * dpi.y + 0.5f);
-    int imeH = (int)(fontSize * dpi.y + 0.5f);
-    SetTextInputRect(imeX, imeY, 1, imeH);
-}
+    // Keep IME candidate window aligned with caret (DPI-aware)
+    static void UpdateImeRect(Rectangle inputBox, Font font, const char *text, int fontSize)
+    {
+        Vector2 textSize = MeasureTextEx(font, text, (float)fontSize, 1);
+        Vector2 caret = (Vector2){ inputBox.x + 10 + textSize.x, inputBox.y + 10 };
+        float scaleX = (float)GetRenderWidth() / (float)GetScreenWidth();
+        float scaleY = (float)GetRenderHeight() / (float)GetScreenHeight();
+        int imeX = (int)(caret.x * scaleX + 0.5f);
+        int imeY = (int)((caret.y + fontSize) * scaleY + 0.5f);
+        int imeH = (int)(fontSize * scaleY + 0.5f);
+        SetTextInputRect(imeX, imeY, 1, imeH);
+    }
 
 int main(void)
 {
@@ -420,74 +484,15 @@ gcc text/text_input_ime.c -o text_input_ime \
 
 ## 验证清单
 
-- [ ] SDL_SetHint 在 SDL_CreateWindow 之前调用
-- [ ] StartTextInput/StopTextInput 正确控制 IME 状态
-- [ ] SetTextInputRect 每帧更新候选框位置
+- [ ] SDL hint 在 **SDL_Init 之前**调用（SDL3 必须）
+- [ ] StartTextInput/StopTextInput 在输入框聚焦/失焦时调用
+- [ ] SetTextInputRect 每帧更新候选框位置（输入框聚焦时）
 - [ ] 已将光标位置转换到窗口像素坐标（含 DPI/缩放/摄像机）
 - [ ] 中文字体正确加载
 - [ ] GetCharPressed 能接收到 Unicode 字符
 - [ ] 退格键正确处理 UTF-8 多字节字符
-
----
-
-## 方案 B：Windows 原生 IME（应用侧修改，不切后端）
-
-> 适用于：你使用 raylib 默认 Win32/GLFW 后端，不想切 SDL，但需要 IME 候选框跟随光标。
-
-### B1. 在应用侧引入 Win32 IME API
-
-```c
-#if defined(_WIN32)
-    #include <windows.h>
-    #include <imm.h>
-#endif
-```
-
-### B2. 设置候选框位置（每帧更新）
-
-```c
-#if defined(_WIN32)
-static void UpdateImeWindowPosition(int x, int y) {
-    HWND hwnd = (HWND)GetWindowHandle(); // raylib API
-    if (!hwnd) return;
-
-    HIMC imc = ImmGetContext(hwnd);
-    if (!imc) return;
-
-    COMPOSITIONFORM cf = {0};
-    cf.dwStyle = CFS_POINT;
-    cf.ptCurrentPos.x = x;
-    cf.ptCurrentPos.y = y;
-    ImmSetCompositionWindow(imc, &cf);
-
-    CANDIDATEFORM cand = {0};
-    cand.dwStyle = CFS_CANDIDATEPOS;
-    cand.ptCurrentPos.x = x;
-    cand.ptCurrentPos.y = y;
-    ImmSetCandidateWindow(imc, &cand);
-
-    ImmReleaseContext(hwnd, imc);
-}
-#endif
-```
-
-调用位置（每帧，或光标移动后）：
-
-```c
-Vector2 dpi = GetWindowScaleDPI();
-int imeX = (int)(caretX * dpi.x + 0.5f);
-int imeY = (int)((caretY + lineHeight) * dpi.y + 0.5f);
-UpdateImeWindowPosition(imeX, imeY);
-```
-
-### B3. 编译链接
-
-Windows 需要链接 `imm32`：
-
-- MSVC/CMake:
-  - `target_link_libraries(your_target PRIVATE imm32)`
-- MinGW:
-  - `-limm32`
+- [ ] SDL_TEXTINPUT 事件中 **整段 UTF-8 都入队**（避免只进第一个字）
+- [ ] SDL_TEXTEDITING 事件触发并绘制预编辑文本
 
 ---
 
@@ -539,12 +544,75 @@ TraceLog(LOG_INFO, "FONT: Loaded %s (%d glyphs)", fontPath, font.glyphCount);
 
 ---
 
-## 常见踩坑
+## 常见踩坑（真实踩过）
 
-1. **只看到 FILEIO 成功**：`LoadFileData` 读到文件不代表字体解析成功。要看 `FONT: Data loaded successfully`。
-2. **TTC 文件未被识别**：必须加 `.ttc` 扩展支持，否则默认回退。
-3. **候选框位置不对**：必须用窗口像素坐标（考虑 DPI/缩放）。
-4. **预编辑文本显示为空**：需要处理 `SDL_TEXTEDITING`（方案 A）或自己渲染预编辑文本。
+1. **SDL3 预编辑事件不触发**：`SDL_HINT_IME_IMPLEMENTED_UI` 必须在 `SDL_Init` 之前设置为 `"composition"`。
+2. **SDL3 API 签名变化**：`SDL_StartTextInput(window)` / `SDL_StopTextInput(window)` / `SDL_TextInputActive(window)`。
+3. **候选框位置错位**：`GetWindowScaleDPI()` 在 SDL3 上不可靠，改用 `GetRenderWidth/Height` 与 `GetScreenWidth/Height` 比例。
+4. **只输入第一个字**：`SDL_TEXTINPUT` 可能一次给多字，必须把整段 UTF-8 全部入队。
+5. **字体读到但仍是问号**：需要 `.ttc` 支持 + 字体集合偏移，否则回退默认字体。
+6. **双光标**：预编辑状态下要隐藏主光标，仅显示预编辑光标。
+7. **预编辑不显示**：必须渲染 `SDL_TEXTEDITING` 文本（SDL 只给数据不绘制）。
+
+---
+
+## 预编辑文本（拼音）显示：完整输入预览
+
+SDL 会通过事件把“预编辑文本（拼音）”发给应用，但**默认不会帮你渲染**。  
+想要看到“输入中拼音+下划线”，必须：
+
+### 1) 在 SDL 平台层缓存预编辑信息
+
+文件：`src/platforms/rcore_desktop_sdl.c`
+
+添加结构与状态：
+
+```c
+static IMECompositionInfo imeComposition = { 0 };
+```
+
+在 `SDL_TEXTEDITING`（SDL2）或 `SDL_EVENT_TEXT_EDITING`（SDL3）里更新：
+
+```c
+#if defined(USING_VERSION_SDL3)
+case SDL_EVENT_TEXT_EDITING:
+    strncpy(imeComposition.text, event.edit.text, sizeof(imeComposition.text) - 1);
+    imeComposition.text[sizeof(imeComposition.text) - 1] = '\0';
+    imeComposition.cursor = event.edit.start;
+    imeComposition.length = event.edit.length;
+    break;
+#else
+case SDL_TEXTEDITING:
+    strncpy(imeComposition.text, event.edit.text, sizeof(imeComposition.text) - 1);
+    imeComposition.text[sizeof(imeComposition.text) - 1] = '\0';
+    imeComposition.cursor = event.edit.start;
+    imeComposition.length = event.edit.length;
+    break;
+#endif
+```
+
+暴露 API：
+
+```c
+IMECompositionInfo GetIMECompositionInfo(void)
+{
+    return imeComposition;
+}
+```
+
+### 2) 在应用侧渲染预编辑文本
+
+```c
+IMECompositionInfo comp = GetIMECompositionInfo();
+if (comp.text[0] != '\0') {
+    DrawTextEx(font, comp.text, caretPos, fontSize, 1.0f, GRAY);
+    float w = MeasureTextEx(font, comp.text, fontSize, 1.0f).x;
+    DrawLine(caretPos.x, caretPos.y + fontSize,
+             caretPos.x + w, caretPos.y + fontSize, GRAY);
+}
+```
+
+> 你可以选择用更浅的颜色或带下划线，让用户明显看到“预编辑状态”。
 
 ## 已知限制
 

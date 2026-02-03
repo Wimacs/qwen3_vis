@@ -1017,6 +1017,25 @@ RLAPI Image GetClipboardImage(void);                              // Get clipboa
 RLAPI void EnableEventWaiting(void);                              // Enable waiting for events on EndDrawing(), no automatic event polling
 RLAPI void DisableEventWaiting(void);                             // Disable waiting for events on EndDrawing(), automatic events polling
 
+//------------------------------------------------------------------------------------
+// IME Support Functions (SDL backend only)
+//------------------------------------------------------------------------------------
+#if defined(PLATFORM_DESKTOP_SDL)
+RLAPI void StartTextInput(void);                                    // Start text input mode (activate IME)
+RLAPI void StopTextInput(void);                                     // Stop text input mode (deactivate IME)
+RLAPI bool IsTextInputActive(void);                                 // Check if text input is active
+RLAPI void SetTextInputRect(int x, int y, int width, int height);   // Set IME candidate window position
+RLAPI Rectangle GetTextInputRect(void);                             // Get current IME rect
+
+typedef struct {
+    char text[64];      // Preedit text (UTF-8)
+    int cursor;         // Cursor position in preedit
+    int length;         // Selection length in preedit
+} IMECompositionInfo;
+
+RLAPI IMECompositionInfo GetIMECompositionInfo(void);              // Get current IME preedit info
+#endif
+
 // Cursor-related functions
 RLAPI void ShowCursor(void);                                      // Shows cursor
 RLAPI void HideCursor(void);                                      // Hides cursor

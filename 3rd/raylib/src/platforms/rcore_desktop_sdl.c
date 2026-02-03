@@ -109,6 +109,9 @@ typedef struct {
 extern CoreData CORE;                   // Global CORE state context
 
 static PlatformData platform = { 0 };   // Platform specific data
+static bool imeEnabled = false;
+static Rectangle imeRect = { 0 };
+static IMECompositionInfo imeComposition = { 0 };
 
 static const KeyboardKey mapScancodeToKey[SCANCODE_MAPPED_NUM] = {
     KEY_NULL,           // SDL_SCANCODE_UNKNOWN
@@ -1592,22 +1595,28 @@ void PollInputEvents(void)
             {
                 // NOTE: event.text.text data comes an UTF-8 text sequence but we register codepoints (int)
 
-                // Check if there is space available in the queue
-                if (CORE.Input.Keyboard.charPressedQueueCount < MAX_CHAR_PRESSED_QUEUE)
+                const char *text = event.text.text;
+                while ((*text != '\0') && (CORE.Input.Keyboard.charPressedQueueCount < MAX_CHAR_PRESSED_QUEUE))
                 {
-                    // Add character (codepoint) to the queue
-
-                #if defined(USING_VERSION_SDL3)
-                    size_t textLen = strlen(event.text.text);
-                    unsigned int codepoint = (unsigned int)SDL_StepUTF8(&event.text.text, &textLen);
-                #else
                     int codepointSize = 0;
-                    int codepoint = GetCodepointNextSDL(event.text.text, &codepointSize);
-                #endif
+                    int codepoint = GetCodepointNextSDL(text, &codepointSize);
 
                     CORE.Input.Keyboard.charPressedQueue[CORE.Input.Keyboard.charPressedQueueCount] = codepoint;
                     CORE.Input.Keyboard.charPressedQueueCount++;
+
+                    text += (codepointSize > 0)? codepointSize : 1;
                 }
+
+                imeComposition.text[0] = '\0';
+                imeComposition.cursor = 0;
+                imeComposition.length = 0;
+            } break;
+            case SDL_TEXTEDITING:
+            {
+                strncpy(imeComposition.text, event.edit.text, sizeof(imeComposition.text) - 1);
+                imeComposition.text[sizeof(imeComposition.text) - 1] = '\0';
+                imeComposition.cursor = (int)event.edit.start;
+                imeComposition.length = (int)event.edit.length;
             } break;
 
             // Check mouse events
@@ -1914,6 +1923,18 @@ void PollInputEvents(void)
 // Initialize platform: graphics, inputs and more
 int InitPlatform(void)
 {
+    #if defined(USING_VERSION_SDL3)
+        #if !defined(SDL_HINT_IME_IMPLEMENTED_UI)
+            #define SDL_HINT_IME_IMPLEMENTED_UI "SDL_IME_IMPLEMENTED_UI"
+        #endif
+    SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, "composition");
+    #else
+        #if !defined(SDL_HINT_IME_SHOW_UI)
+            #define SDL_HINT_IME_SHOW_UI "SDL_IME_SHOW_UI"
+        #endif
+    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+    #endif
+
     // Initialize SDL internal global state, only required systems
     // NOTE: Not all systems need to be initialized, SDL_INIT_AUDIO is not required, managed by miniaudio
     int result = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER);
@@ -2104,6 +2125,66 @@ int InitPlatform(void)
 #endif
 
     return 0;
+}
+
+//----------------------------------------------------------------------------------
+// Module Functions Definition: IME Support (SDL backend only)
+//----------------------------------------------------------------------------------
+
+void StartTextInput(void)
+{
+    imeEnabled = true;
+#if defined(USING_VERSION_SDL3)
+    SDL_StartTextInput(platform.window);
+#else
+    SDL_StartTextInput();
+#endif
+}
+
+void StopTextInput(void)
+{
+    imeEnabled = false;
+#if defined(USING_VERSION_SDL3)
+    SDL_StopTextInput(platform.window);
+#else
+    SDL_StopTextInput();
+#endif
+
+    imeComposition.text[0] = '\0';
+    imeComposition.cursor = 0;
+    imeComposition.length = 0;
+}
+
+bool IsTextInputActive(void)
+{
+#if defined(USING_VERSION_SDL3)
+    return SDL_TextInputActive(platform.window);
+#else
+    return SDL_IsTextInputActive();
+#endif
+}
+
+void SetTextInputRect(int x, int y, int width, int height)
+{
+    imeRect = (Rectangle){ (float)x, (float)y, (float)width, (float)height };
+
+#if defined(USING_VERSION_SDL3)
+    SDL_Rect rect = { x, y, width, height };
+    SDL_SetTextInputArea(platform.window, &rect, 0);
+#else
+    SDL_Rect rect = { x, y, width, height };
+    SDL_SetTextInputRect(&rect);
+#endif
+}
+
+Rectangle GetTextInputRect(void)
+{
+    return imeRect;
+}
+
+IMECompositionInfo GetIMECompositionInfo(void)
+{
+    return imeComposition;
 }
 
 // Close platform

@@ -59,9 +59,20 @@ if(QWEN3_BUILD_GUI)
     set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(PLATFORM "SDL" CACHE STRING "" FORCE)
+
+    # SDL2 (submodule) configuration
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory(3rd/SDL2 EXCLUDE_FROM_ALL)
     
     # Add raylib as subdirectory
     add_subdirectory(3rd/raylib)
+
+    # Force SDL platform define on raylib target to ensure SDL backend is compiled
+    target_compile_definitions(raylib PRIVATE PLATFORM_DESKTOP_SDL)
+    target_compile_definitions(raylib PUBLIC PLATFORM_DESKTOP_SDL)
     
     # GUI executable
     add_executable(runq_gui
