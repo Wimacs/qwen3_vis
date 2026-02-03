@@ -311,8 +311,9 @@ void matmul(float *xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
     // by far the most amount of time is spent inside this little function
     // inputs to this function are both quantized
 
+    int i;
     #pragma omp parallel for
-    for (int i = 0; i < d; i++) {
+    for (i = 0; i < d; i++) {
         float val = 0;
         int in = i * n;
 
@@ -392,8 +393,9 @@ float *forward(Transformer *transformer, int token, int pos) {
         }
 
         // multihead attention. iterate over all heads
+        int h;
         #pragma omp parallel for
-        for (int h = 0; h < p->n_heads; h++) {
+        for (h = 0; h < p->n_heads; h++) {
             // get the query vector for this head
             float *q = s->q + h * p->head_dim;
             // attention scores for this head
@@ -854,7 +856,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
     int user_turn = 1; // user starts
     int next;        // will store the next token in the sequence
     int token;       // stores the current token to feed into the transformer
-    int pos = 0;     // position in the sequence
+    int pos = 0;     // position in the sequence (absolute position for KV cache)
+    int prompt_idx = 0; // index for processing current prompt tokens
 
     while (1) {
         // if context window is exceeded, clear it
@@ -888,25 +891,27 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
 
             // encode the rendered prompt into tokens
             encode(tokenizer, rendered_prompt, prompt_tokens, &num_prompt_tokens);
-            pos = 0; // reset the user index
+            prompt_idx = 0; // reset prompt processing index (not pos!)
             user_turn = 0;
         }
 
         // determine the token to pass into the transformer next
-        if (pos < num_prompt_tokens) {
+        if (prompt_idx < num_prompt_tokens) {
             // if we are still processing the input prompt, force the next prompt token
-            token = prompt_tokens[pos];
+            token = prompt_tokens[prompt_idx];
+            prompt_idx++;
         } else {
             // otherwise use the next token sampled from previous turn
             token = next;
         }
 
         // forward the transformer to get logits for the next token
-        float *logits = forward(transformer, token, pos++);
+        float *logits = forward(transformer, token, pos);
         next = sample(sampler, logits);
+        pos++;
 
         // assistant is responding
-        if (pos >= num_prompt_tokens) {
+        if (prompt_idx >= num_prompt_tokens) {
             if (token == tokenizer->bos_token_id || token == tokenizer->eos_token_id) {
                 // EOS token ends the assistant turn
                 printf("\n");

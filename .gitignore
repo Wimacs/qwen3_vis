@@ -1,0 +1,64 @@
+# Model weights and binary checkpoints
+*.bin
+*.safetensors
+*.gguf
+
+# Tokenizer / model data (large, user-downloaded)
+*.bin.tokenizer
+Qwen3-*/
+!Qwen3-*/.gitattributes
+
+# Run/config templates (user-specific)
+*.bin.template
+*.bin.template.*
+
+# Fonts (large, user-provided)
+*.ttc
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# Build outputs
+build/
+out/
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.tlog
+*.log
+.vs/
+x64/
+Debug/
+Release/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
+*.egg-info/
+.eggs/
+dist/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+nul
+
+# Local config
+config.local.*
+*.local.json
+.env.local
